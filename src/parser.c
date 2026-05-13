@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cpu.h"
 #include "memory.h"
 #include "opcodes.h"
 #include "parser.h"
@@ -108,12 +109,29 @@ void parse_assembly_file(const char *filepath)
         case OPCODE_SUB:
         case OPCODE_MUL:
         case OPCODE_AND:
-        case OPCODE_MOVR:
         {
             uint32_t rd = parse_register(arg1);
             uint32_t rs = parse_register(arg2);
             uint32_t rt = parse_register(arg3);
             encoded = encode_r_type((opcode_t)opcode, rs, rt, rd);
+            break;
+        }
+        case OPCODE_MOVR:
+        {
+            if (arg3 != NULL && arg3[0] == 'R')
+            {
+                uint32_t rd = parse_register(arg1);
+                uint32_t rs = parse_register(arg2);
+                uint32_t rt = parse_register(arg3);
+                encoded = encode_r_type((opcode_t)opcode, rs, rt, rd);
+            }
+            else
+            {
+                uint32_t r1 = parse_register(arg1);
+                uint32_t r2 = parse_register(arg2);
+                int32_t immediate = parse_immediate(arg3);
+                encoded = encode_i_type((opcode_t)opcode, r2, r1, immediate);
+            }
             break;
         }
         case OPCODE_MOVI:
@@ -156,9 +174,10 @@ void parse_assembly_file(const char *filepath)
         }
         case OPCODE_MOVM:
         {
-            uint32_t rt = parse_register(arg1);
-            int32_t address = parse_immediate(arg2);
-            encoded = encode_i_type((opcode_t)opcode, 0u, rt, address);
+            uint32_t r1 = parse_register(arg1);
+            uint32_t r2 = arg3 == NULL ? 0u : parse_register(arg2);
+            int32_t immediate = parse_immediate(arg3 == NULL ? arg2 : arg3);
+            encoded = encode_i_type((opcode_t)opcode, r2, r1, immediate);
             break;
         }
         default:
@@ -177,5 +196,6 @@ void parse_assembly_file(const char *filepath)
         }
     }
 
+    cpu_set_instruction_count((int)instruction_address);
     fclose(file);
 }
