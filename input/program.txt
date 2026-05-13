@@ -1,0 +1,15 @@
+# sample program for Person 1
+# instruction memory area should contain only encoded machine code
+MOVI R1 5
+MOVI R2 10
+ADD R1 R2 R3
+SUB R3 R1 R4
+MUL R1 R2 R5
+AND R3 R4 R6
+XORI R7 R1 0xFF
+LSL R8 R1 2
+LSR R9 R2 1
+MOVR R10 R11 R12
+MOVM R13 1024
+JEQ R1 R2 8
+JMP 12
