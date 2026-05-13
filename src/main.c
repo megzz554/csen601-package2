@@ -2,10 +2,10 @@
 #include <stdbool.h>
 
 #include "cpu.h"
-#include "fetch.h"
 #include "memory.h"
 #include "opcodes.h"
 #include "parser.h"
+#include "pipeline_sim.h"
 
 static bool record_check(const char *name, bool passed)
 {
@@ -101,8 +101,10 @@ static bool run_person2_self_test(void)
     return passed;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *program_path = argc > 1 ? argv[1] : "input/program.txt";
+
     printf("Starting simulator for Fillet-O-Neumann...\n");
 
     if (!run_person2_self_test())
@@ -116,15 +118,13 @@ int main(void)
     memory_init();
 
     // Load assembly text, encode each line, and store into instruction memory.
-    parse_assembly_file("input/program.txt");
+    printf("Loading assembly program: %s\n", program_path);
+    parse_assembly_file(program_path);
     memory_dump_instructions(16);
 
-    printf("\nBeginning fetch stage. PC starts at 0.\n");
-    while (cpu_get_pc() < (uint32_t)cpu.instructionCount)
-    {
-        fetch_instruction();
-    }
-
-    printf("Fetch stage finished. Final PC=%u instructionCount=%d\n", cpu_get_pc(), cpu.instructionCount);
+    pipeline_sim_run(&cpu, (PipelineSimOptions){
+                               .dump_nonzero_memory_only = true,
+                               .max_cycles = 300,
+                           });
     return 0;
 }

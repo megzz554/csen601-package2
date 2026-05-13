@@ -141,7 +141,7 @@ void parse_assembly_file(const char *filepath)
             encoded = encode_i_type((opcode_t)opcode, 0u, rt, immediate);
             break;
         }
-        case OPCODE_XORI:
+        case OPCODE_ORI:
         {
             uint32_t rt = parse_register(arg1);
             uint32_t rs = parse_register(arg2);

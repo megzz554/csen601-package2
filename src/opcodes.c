@@ -36,9 +36,9 @@ int opcode_from_string(const char *text)
     {
         return OPCODE_AND;
     }
-    if (strcmp(text, "XORI") == 0)
+    if (strcmp(text, "ORI") == 0 || strcmp(text, "XORI") == 0)
     {
-        return OPCODE_XORI;
+        return OPCODE_ORI;
     }
     if (strcmp(text, "JMP") == 0)
     {

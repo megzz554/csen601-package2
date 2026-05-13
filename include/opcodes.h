@@ -33,13 +33,16 @@ typedef enum
     OPCODE_MOVI = 3,
     OPCODE_JEQ = 4,
     OPCODE_AND = 5,
-    OPCODE_XORI = 6,
+    OPCODE_ORI = 6,
     OPCODE_JMP = 7,
     OPCODE_LSL = 8,
     OPCODE_LSR = 9,
     OPCODE_MOVR = 10,
     OPCODE_MOVM = 11
 } opcode_t;
+
+// Backward-compatible alias for the earlier Person 1 sample program.
+#define OPCODE_XORI OPCODE_ORI
 
 int opcode_from_string(const char *text);
 instruction_t encode_r_type(opcode_t opcode, uint32_t rs, uint32_t rt, uint32_t rd);
