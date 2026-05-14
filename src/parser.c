@@ -110,60 +110,60 @@ void parse_assembly_file(const char *filepath)
         case OPCODE_MUL:
         case OPCODE_AND:
         {
-            uint32_t rd = parse_register(arg1);
-            uint32_t rs = parse_register(arg2);
-            uint32_t rt = parse_register(arg3);
-            encoded = encode_r_type((opcode_t)opcode, rs, rt, rd);
+            uint32_t r1 = parse_register(arg1);
+            uint32_t r2 = parse_register(arg2);
+            uint32_t r3 = parse_register(arg3);
+            encoded = encode_r_type((opcode_t)opcode, r1, r2, r3, 0u);
             break;
         }
         case OPCODE_MOVR:
         {
             if (arg3 != NULL && arg3[0] == 'R')
             {
-                uint32_t rd = parse_register(arg1);
-                uint32_t rs = parse_register(arg2);
-                uint32_t rt = parse_register(arg3);
-                encoded = encode_r_type((opcode_t)opcode, rs, rt, rd);
+                uint32_t r1 = parse_register(arg1);
+                uint32_t r2 = parse_register(arg2);
+                uint32_t r3 = parse_register(arg3);
+                encoded = encode_r_type((opcode_t)opcode, r1, r2, r3, 0u);
             }
             else
             {
                 uint32_t r1 = parse_register(arg1);
                 uint32_t r2 = parse_register(arg2);
                 int32_t immediate = parse_immediate(arg3);
-                encoded = encode_i_type((opcode_t)opcode, r2, r1, immediate);
+                encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
             }
             break;
         }
         case OPCODE_MOVI:
         {
-            uint32_t rt = parse_register(arg1);
+            uint32_t r1 = parse_register(arg1);
             int32_t immediate = parse_immediate(arg2);
-            encoded = encode_i_type((opcode_t)opcode, 0u, rt, immediate);
+            encoded = encode_i_type((opcode_t)opcode, r1, 0u, immediate);
             break;
         }
         case OPCODE_ORI:
         {
-            uint32_t rt = parse_register(arg1);
-            uint32_t rs = parse_register(arg2);
+            uint32_t r1 = parse_register(arg1);
+            uint32_t r2 = parse_register(arg2);
             int32_t immediate = parse_immediate(arg3);
-            encoded = encode_i_type((opcode_t)opcode, rs, rt, immediate);
+            encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
             break;
         }
         case OPCODE_JEQ:
         {
-            uint32_t rs = parse_register(arg1);
-            uint32_t rt = parse_register(arg2);
+            uint32_t r1 = parse_register(arg1);
+            uint32_t r2 = parse_register(arg2);
             int32_t offset = parse_immediate(arg3);
-            encoded = encode_i_type((opcode_t)opcode, rs, rt, offset);
+            encoded = encode_i_type((opcode_t)opcode, r1, r2, offset);
             break;
         }
         case OPCODE_LSL:
         case OPCODE_LSR:
         {
-            uint32_t rt = parse_register(arg1);
-            uint32_t rs = parse_register(arg2);
+            uint32_t r1 = parse_register(arg1);
+            uint32_t r2 = parse_register(arg2);
             int32_t amount = parse_immediate(arg3);
-            encoded = encode_i_type((opcode_t)opcode, rs, rt, amount);
+            encoded = encode_r_type((opcode_t)opcode, r1, r2, 0u, (uint32_t)amount);
             break;
         }
         case OPCODE_JMP:
@@ -177,7 +177,7 @@ void parse_assembly_file(const char *filepath)
             uint32_t r1 = parse_register(arg1);
             uint32_t r2 = arg3 == NULL ? 0u : parse_register(arg2);
             int32_t immediate = parse_immediate(arg3 == NULL ? arg2 : arg3);
-            encoded = encode_i_type((opcode_t)opcode, r2, r1, immediate);
+            encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
             break;
         }
         default:
