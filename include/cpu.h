@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "decode_types.h"
+
 #define MEMORY_SIZE 2048
 #define INSTRUCTION_MEMORY_SIZE 1024
 #define DATA_MEMORY_START 1024
@@ -27,6 +29,8 @@ typedef struct
     uint32_t rawInstruction;
 
     int opcode;
+    instruction_format_t format;
+    control_signals_t control;
 
     int r1;
     int r2;

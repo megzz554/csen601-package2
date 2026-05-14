@@ -1,10 +1,11 @@
 #include <string.h>
 #include "opcodes.h"
 
-// This file isolates raw instruction encoding for Person 1.
-// The parser only calls these helpers and does not depend on the exact bit layout.
-// If the official Package 2 instruction format is later specified, update this file
-// and its header without changing parser or fetch logic.
+static bool is_shift_opcode(opcode_t opcode)
+{
+    return opcode == OPCODE_LSL || opcode == OPCODE_LSR;
+}
+
 int opcode_from_string(const char *text)
 {
     if (text == NULL)
@@ -64,16 +65,97 @@ int opcode_from_string(const char *text)
     return -1;
 }
 
-// Build an R-type instruction word from opcode and register fields.
-instruction_t encode_r_type(opcode_t opcode, uint32_t rs, uint32_t rt, uint32_t rd)
+instruction_format_t opcode_instruction_format(opcode_t opcode)
 {
-    return ((instruction_t)opcode << OPCODE_SHIFT) | ((instruction_t)rs << REG_SHIFT_RS) | ((instruction_t)rt << REG_SHIFT_RT) | ((instruction_t)rd << REG_SHIFT_RD);
+    switch (opcode)
+    {
+    case OPCODE_ADD:
+    case OPCODE_SUB:
+    case OPCODE_MUL:
+    case OPCODE_AND:
+    case OPCODE_LSL:
+    case OPCODE_LSR:
+        return INSTRUCTION_FORMAT_R;
+    case OPCODE_JMP:
+        return INSTRUCTION_FORMAT_J;
+    case OPCODE_MOVI:
+    case OPCODE_JEQ:
+    case OPCODE_ORI:
+    case OPCODE_MOVR:
+    case OPCODE_MOVM:
+        return INSTRUCTION_FORMAT_I;
+    default:
+        return INSTRUCTION_FORMAT_INVALID;
+    }
 }
 
-instruction_t encode_i_type(opcode_t opcode, uint32_t rs, uint32_t rt, int32_t immediate)
+alu_operation_t opcode_alu_operation(opcode_t opcode)
+{
+    switch (opcode)
+    {
+    case OPCODE_ADD:
+        return ALU_OP_ADD;
+    case OPCODE_SUB:
+        return ALU_OP_SUB;
+    case OPCODE_MUL:
+        return ALU_OP_MUL;
+    case OPCODE_AND:
+        return ALU_OP_AND;
+    case OPCODE_ORI:
+        return ALU_OP_OR;
+    case OPCODE_LSL:
+        return ALU_OP_SHIFT_LEFT;
+    case OPCODE_LSR:
+        return ALU_OP_SHIFT_RIGHT;
+    case OPCODE_MOVI:
+        return ALU_OP_PASS_B;
+    default:
+        return ALU_OP_NONE;
+    }
+}
+
+bool opcode_writes_register(opcode_t opcode)
+{
+    switch (opcode)
+    {
+    case OPCODE_ADD:
+    case OPCODE_SUB:
+    case OPCODE_MUL:
+    case OPCODE_MOVI:
+    case OPCODE_AND:
+    case OPCODE_ORI:
+    case OPCODE_LSL:
+    case OPCODE_LSR:
+    case OPCODE_MOVR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+instruction_t encode_r_type(opcode_t opcode, uint32_t r1, uint32_t r2, uint32_t r3, uint32_t shamt)
+{
+    uint32_t encoded_shamt = shamt & SHAMT_MASK;
+
+    if (!is_shift_opcode(opcode))
+    {
+        encoded_shamt = shamt & SHAMT_MASK;
+    }
+
+    return ((instruction_t)opcode << OPCODE_SHIFT) |
+           ((instruction_t)r1 << R1_SHIFT) |
+           ((instruction_t)r2 << R2_SHIFT) |
+           ((instruction_t)r3 << R3_SHIFT) |
+           encoded_shamt;
+}
+
+instruction_t encode_i_type(opcode_t opcode, uint32_t r1, uint32_t r2, int32_t immediate)
 {
     uint32_t imm = (uint32_t)immediate & IMM_MASK;
-    return ((instruction_t)opcode << OPCODE_SHIFT) | ((instruction_t)rs << REG_SHIFT_RS) | ((instruction_t)rt << REG_SHIFT_RT) | imm;
+    return ((instruction_t)opcode << OPCODE_SHIFT) |
+           ((instruction_t)r1 << R1_SHIFT) |
+           ((instruction_t)r2 << R2_SHIFT) |
+           imm;
 }
 
 instruction_t encode_j_type(opcode_t opcode, uint32_t address)

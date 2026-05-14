@@ -2,28 +2,23 @@
 #define OPCODES_H
 
 #include <stdint.h>
+
+#include "decode_types.h"
 #include "instruction.h"
 
-// NOTE: Official Package 2 instruction bit layout is not explicitly supplied here.
-// The current encoding is a provisional, isolated implementation for Person 1.
-// This file is intended to keep encoding details separate from parser/fetch.
-// When the project specification defines the exact layout, only this file
-// and the matching implementation in src/opcodes.c should need update.
-//
-// Current provisional layout:
-//   [31:26] opcode (6 bits)
-//   [25:21] rs     (5 bits)
-//   [20:16] rt     (5 bits)
-//   [15:11] rd     (5 bits)
-//   [15:0]  immediate for I-type
-//   [25:0]  address for J-type
+// Package 2 bit layout.
+//   R-format: [31:28] opcode, [27:23] R1, [22:18] R2, [17:13] R3, [12:0] shamt
+//   I-format: [31:28] opcode, [27:23] R1, [22:18] R2, [17:0] immediate
+//   J-format: [31:28] opcode, [27:0] address
 
-#define OPCODE_SHIFT 26u
-#define REG_SHIFT_RS 21u
-#define REG_SHIFT_RT 16u
-#define REG_SHIFT_RD 11u
-#define IMM_MASK 0xFFFFu
-#define ADDR_MASK 0x03FFFFFFu
+#define OPCODE_SHIFT 28u
+#define R1_SHIFT 23u
+#define R2_SHIFT 18u
+#define R3_SHIFT 13u
+#define SHAMT_MASK 0x1FFFu
+#define IMM_MASK 0x3FFFFu
+#define ADDR_MASK 0x0FFFFFFFu
+#define REGISTER_MASK 0x1Fu
 
 typedef enum
 {
@@ -45,8 +40,11 @@ typedef enum
 #define OPCODE_XORI OPCODE_ORI
 
 int opcode_from_string(const char *text);
-instruction_t encode_r_type(opcode_t opcode, uint32_t rs, uint32_t rt, uint32_t rd);
-instruction_t encode_i_type(opcode_t opcode, uint32_t rs, uint32_t rt, int32_t immediate);
+instruction_format_t opcode_instruction_format(opcode_t opcode);
+alu_operation_t opcode_alu_operation(opcode_t opcode);
+bool opcode_writes_register(opcode_t opcode);
+instruction_t encode_r_type(opcode_t opcode, uint32_t r1, uint32_t r2, uint32_t r3, uint32_t shamt);
+instruction_t encode_i_type(opcode_t opcode, uint32_t r1, uint32_t r2, int32_t immediate);
 instruction_t encode_j_type(opcode_t opcode, uint32_t address);
 
 #endif // OPCODES_H

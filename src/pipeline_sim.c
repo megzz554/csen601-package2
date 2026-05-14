@@ -72,9 +72,70 @@ static const char *opcode_name(int opcode)
     }
 }
 
-static int32_t sign_extend_16(uint32_t value)
+static int32_t sign_extend(uint32_t value, unsigned bit_count)
 {
-    return (value & 0x8000u) ? (int32_t)(value | 0xFFFF0000u) : (int32_t)value;
+    uint32_t mask = (1u << bit_count) - 1u;
+    uint32_t sign_bit = 1u << (bit_count - 1u);
+
+    value &= mask;
+    if ((value & sign_bit) != 0u)
+    {
+        value |= ~mask;
+    }
+
+    return (int32_t)value;
+}
+
+static control_signals_t generate_control_signals(opcode_t opcode)
+{
+    control_signals_t control;
+
+    memset(&control, 0, sizeof(control));
+    control.alu_op = opcode_alu_operation(opcode);
+
+    switch (opcode)
+    {
+    case OPCODE_ADD:
+    case OPCODE_SUB:
+    case OPCODE_MUL:
+    case OPCODE_AND:
+        control.reg_write = true;
+        break;
+    case OPCODE_MOVI:
+        control.reg_write = true;
+        control.use_immediate = true;
+        break;
+    case OPCODE_JEQ:
+        control.branch = true;
+        control.use_immediate = true;
+        break;
+    case OPCODE_ORI:
+        control.reg_write = true;
+        control.use_immediate = true;
+        break;
+    case OPCODE_JMP:
+        control.jump = true;
+        break;
+    case OPCODE_LSL:
+    case OPCODE_LSR:
+        control.reg_write = true;
+        control.use_shamt = true;
+        break;
+    case OPCODE_MOVR:
+        control.reg_write = true;
+        control.mem_read = true;
+        control.mem_to_reg = true;
+        control.use_immediate = true;
+        break;
+    case OPCODE_MOVM:
+        control.mem_write = true;
+        control.use_immediate = true;
+        break;
+    default:
+        break;
+    }
+
+    return control;
 }
 
 static bool slot_is_empty(const StageSlot *slot)
@@ -103,7 +164,9 @@ static void decode_raw_instruction(PipelineRegister *reg)
 {
     uint32_t raw = reg->rawInstruction;
 
-    reg->opcode = (int)((raw >> OPCODE_SHIFT) & 0x3Fu);
+    reg->opcode = (int)((raw >> OPCODE_SHIFT) & 0xFu);
+    reg->format = opcode_instruction_format((opcode_t)reg->opcode);
+    reg->control = generate_control_signals((opcode_t)reg->opcode);
     reg->r1 = 0;
     reg->r2 = 0;
     reg->r3 = 0;
@@ -115,36 +178,40 @@ static void decode_raw_instruction(PipelineRegister *reg)
     reg->aluResult = 0;
     reg->memoryData = 0;
 
-    /*
-     * The existing Person 1 encoding is MIPS-like:
-     * R-type: opcode rs rt rd
-     * I-type: opcode rs rt imm
-     * J-type: opcode address
-     *
-     * The shared PipelineRegister uses r1 as the main destination/source
-     * register for current Person 2 memory helpers, so we normalize fields here.
-     */
-    if (reg->opcode == OPCODE_JMP)
+    if (reg->format == INSTRUCTION_FORMAT_INVALID)
+    {
+        reg->valid = 0;
+        return;
+    }
+
+    if (reg->format == INSTRUCTION_FORMAT_J)
     {
         reg->address = (int)(raw & ADDR_MASK);
         return;
     }
 
-    if (reg->opcode == OPCODE_ADD ||
-        reg->opcode == OPCODE_SUB ||
-        reg->opcode == OPCODE_MUL ||
-        reg->opcode == OPCODE_AND)
+    if (reg->format == INSTRUCTION_FORMAT_R)
     {
-        reg->r2 = (int)((raw >> REG_SHIFT_RS) & 0x1Fu);
-        reg->r3 = (int)((raw >> REG_SHIFT_RT) & 0x1Fu);
-        reg->r1 = (int)((raw >> REG_SHIFT_RD) & 0x1Fu);
+        reg->r1 = (int)((raw >> R1_SHIFT) & REGISTER_MASK);
+        reg->r2 = (int)((raw >> R2_SHIFT) & REGISTER_MASK);
+        reg->r3 = (int)((raw >> R3_SHIFT) & REGISTER_MASK);
+        reg->shamt = (int)(raw & SHAMT_MASK);
         return;
     }
 
-    reg->r2 = (int)((raw >> REG_SHIFT_RS) & 0x1Fu);
-    reg->r1 = (int)((raw >> REG_SHIFT_RT) & 0x1Fu);
-    reg->immediate = sign_extend_16(raw & IMM_MASK);
-    reg->shamt = reg->immediate & 0x1F;
+    if (reg->format == INSTRUCTION_FORMAT_I)
+    {
+        reg->r1 = (int)((raw >> R1_SHIFT) & REGISTER_MASK);
+        reg->r2 = (int)((raw >> R2_SHIFT) & REGISTER_MASK);
+        reg->immediate = sign_extend(raw & IMM_MASK, 18u);
+
+        if (reg->opcode == OPCODE_MOVI)
+        {
+            reg->r2 = 0;
+        }
+
+        return;
+    }
 }
 
 static bool instruction_writes_register(const PipelineRegister *reg)
@@ -154,21 +221,7 @@ static bool instruction_writes_register(const PipelineRegister *reg)
         return false;
     }
 
-    switch (reg->opcode)
-    {
-    case OPCODE_ADD:
-    case OPCODE_SUB:
-    case OPCODE_MUL:
-    case OPCODE_MOVI:
-    case OPCODE_AND:
-    case OPCODE_ORI:
-    case OPCODE_LSL:
-    case OPCODE_LSR:
-    case OPCODE_MOVR:
-        return true;
-    default:
-        return false;
-    }
+    return opcode_writes_register((opcode_t)reg->opcode);
 }
 
 static int destination_register(const PipelineRegister *reg)
@@ -241,8 +294,8 @@ static void latch_decode_operands(CPU *target, PipelineEngine *engine, PipelineR
         reg->operand2 = read_operand_with_forwarding(target, engine, reg->r3);
         break;
     case OPCODE_JEQ:
-        reg->operand1 = read_operand_with_forwarding(target, engine, reg->r2);
-        reg->operand2 = read_operand_with_forwarding(target, engine, reg->r1);
+        reg->operand1 = read_operand_with_forwarding(target, engine, reg->r1);
+        reg->operand2 = read_operand_with_forwarding(target, engine, reg->r2);
         break;
     case OPCODE_ORI:
     case OPCODE_LSL:
@@ -292,14 +345,21 @@ static void print_instruction_detail(const PipelineRegister *reg)
         printf("MOVI R%d %d\n", reg->r1, reg->immediate);
         break;
     case OPCODE_JEQ:
-        printf("JEQ R%d R%d %d\n", reg->r2, reg->r1, reg->immediate);
+        printf("JEQ R%d R%d %d\n", reg->r1, reg->r2, reg->immediate);
         break;
     case OPCODE_ORI:
     case OPCODE_LSL:
     case OPCODE_LSR:
     case OPCODE_MOVR:
     case OPCODE_MOVM:
-        printf("%s R%d R%d %d\n", opcode_name(reg->opcode), reg->r1, reg->r2, reg->immediate);
+        if (reg->opcode == OPCODE_LSL || reg->opcode == OPCODE_LSR)
+        {
+            printf("%s R%d R%d %d\n", opcode_name(reg->opcode), reg->r1, reg->r2, reg->shamt);
+        }
+        else
+        {
+            printf("%s R%d R%d %d\n", opcode_name(reg->opcode), reg->r1, reg->r2, reg->immediate);
+        }
         break;
     case OPCODE_JMP:
         printf("JMP %d\n", reg->address);
@@ -454,7 +514,7 @@ static bool calculate_branch_target(CPU *target,
     }
     else if (reg->opcode == OPCODE_JMP)
     {
-        uint32_t upper_pc = target->PC & 0xF0000000u;
+        uint32_t upper_pc = reg->pc & 0xF0000000u;
         *target_pc = upper_pc | ((uint32_t)reg->address & ADDR_MASK);
         taken = true;
         printf("  [BRANCH] JMP target=%u (upper PC bits preserved)\n", *target_pc);
@@ -474,39 +534,44 @@ static void complete_ex_stage(CPU *target, PipelineEngine *engine, PipelineRegis
            reg->immediate,
            reg->shamt);
 
-    switch (reg->opcode)
+    switch (reg->control.alu_op)
     {
-    case OPCODE_ADD:
+    case ALU_OP_ADD:
         reg->aluResult = reg->operand1 + reg->operand2;
         break;
-    case OPCODE_SUB:
+    case ALU_OP_SUB:
         reg->aluResult = reg->operand1 - reg->operand2;
         break;
-    case OPCODE_MUL:
+    case ALU_OP_MUL:
         reg->aluResult = reg->operand1 * reg->operand2;
         break;
-    case OPCODE_MOVI:
-        reg->aluResult = reg->immediate;
-        break;
-    case OPCODE_AND:
+    case ALU_OP_AND:
         reg->aluResult = reg->operand1 & reg->operand2;
         break;
-    case OPCODE_ORI:
+    case ALU_OP_OR:
         reg->aluResult = reg->operand1 | reg->immediate;
         break;
-    case OPCODE_LSL:
+    case ALU_OP_SHIFT_LEFT:
         reg->aluResult = (int32_t)((uint32_t)reg->operand1 << reg->shamt);
         break;
-    case OPCODE_LSR:
+    case ALU_OP_SHIFT_RIGHT:
         reg->aluResult = (int32_t)((uint32_t)reg->operand1 >> reg->shamt);
         break;
-    case OPCODE_MOVR:
-    case OPCODE_MOVM:
+    case ALU_OP_PASS_B:
+        reg->aluResult = reg->operand2;
+        break;
+    case ALU_OP_NONE:
+        break;
+    }
+
+    if (reg->opcode == OPCODE_MOVR || reg->opcode == OPCODE_MOVM)
+    {
         reg->address = reg->operand1 + reg->immediate;
         reg->memoryData = reg->operand2;
-        break;
-    case OPCODE_JEQ:
-    case OPCODE_JMP:
+    }
+
+    if (reg->control.branch || reg->control.jump)
+    {
         if (calculate_branch_target(target, reg, &target_pc))
         {
             cpu_set_pc(target_pc);
@@ -514,11 +579,6 @@ static void complete_ex_stage(CPU *target, PipelineEngine *engine, PipelineRegis
             engine->wait_for_taken_branch_mem = true;
             printf("  [PC] updated to %u; fetch waits until branch reaches MEM\n", target_pc);
         }
-        break;
-    default:
-        printf("  [EX] unknown opcode %d; instruction invalidated\n", reg->opcode);
-        reg->valid = 0;
-        break;
     }
 
     printf("  [EX] output: aluResult=%d address=%d\n", reg->aluResult, reg->address);
@@ -526,12 +586,12 @@ static void complete_ex_stage(CPU *target, PipelineEngine *engine, PipelineRegis
 
 static void complete_mem_stage(CPU *target, PipelineEngine *engine, PipelineRegister *reg)
 {
-    if (reg->opcode == OPCODE_MOVR)
+    if (reg->control.mem_read)
     {
         reg->memoryData = readMemory(target, reg->address);
         printf("  [MEM] MOVR loaded %d from address %d\n", reg->memoryData, reg->address);
     }
-    else if (reg->opcode == OPCODE_MOVM)
+    else if (reg->control.mem_write)
     {
         commitMemoryWrite(target, reg->address, reg->memoryData);
         printf("  [MEM] MOVM stored %d into address %d\n", reg->memoryData, reg->address);
@@ -550,13 +610,13 @@ static void complete_mem_stage(CPU *target, PipelineEngine *engine, PipelineRegi
 
 static void complete_wb_stage(CPU *target, PipelineRegister *reg)
 {
-    if (!instruction_writes_register(reg))
+    if (!instruction_writes_register(reg) || !reg->control.reg_write)
     {
         printf("  [WB] no register write\n");
         return;
     }
 
-    if (reg->opcode == OPCODE_MOVR)
+    if (reg->control.mem_to_reg)
     {
         commitRegisterWrite(target, reg->r1, reg->memoryData, "WB");
         printf("  [WB] wrote load value %d to R%d\n", reg->memoryData, reg->r1);
@@ -654,7 +714,7 @@ static void fetch_into_if(CPU *target, PipelineEngine *engine)
      * Decode opcode early only for readable pipeline visualization.  The ID
      * stage still performs the real field extraction after its two cycles.
      */
-    reg.opcode = (int)((reg.rawInstruction >> OPCODE_SHIFT) & 0x3Fu);
+    reg.opcode = (int)((reg.rawInstruction >> OPCODE_SHIFT) & 0xFu);
 
     set_slot(&engine->if_stage, reg, IF_CYCLES);
     printf("  [IF] fetched PC=%u raw=0x%08X; PC incremented to %u\n",
