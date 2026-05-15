@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "cpu.h"
+#include "execute.h"
 
 /*
  * Person 6 integration layer.
