@@ -7,11 +7,10 @@
 #include "execute.h"
 
 /*
- * Person 6 integration layer.
+ * Pipeline engine.
  *
- * This module intentionally wraps the current teammate modules instead of
- * replacing their APIs.  It owns only simulation orchestration, branch/jump PC
- * updates, flushing, and debug printing.
+ * This module owns cycle scheduling, pipeline movement, data-hazard handling,
+ * forwarding/stalling, control-hazard flushing, and IF/MEM memory-port timing.
  */
 
 typedef struct

@@ -37,6 +37,7 @@ typedef struct
 
     int cycle;
     bool wait_for_taken_branch_mem;
+    bool stall_id_this_cycle;
 } PipelineEngine;
 
 static const char *opcode_name(int opcode)
@@ -229,12 +230,21 @@ static int destination_register(const PipelineRegister *reg)
     return instruction_writes_register(reg) ? reg->r1 : -1;
 }
 
-/*
- * Lightweight forwarding for integration testing.
- * Person 5 owns complete hazard handling, but this prevents the Person 6 test
- * programs from being dominated by stale register reads while the team engine
- * is still under construction.
- */
+static bool stage_can_forward(const StageSlot *slot)
+{
+    if (slot_is_empty(slot) || !slot->completed || !instruction_writes_register(&slot->reg))
+    {
+        return false;
+    }
+
+    if (slot->reg.opcode == OPCODE_MOVR)
+    {
+        return slot->reg.control.mem_to_reg;
+    }
+
+    return true;
+}
+
 static int32_t read_operand_with_forwarding(CPU *target,
                                             PipelineEngine *engine,
                                             int reg_index)
@@ -248,36 +258,129 @@ static int32_t read_operand_with_forwarding(CPU *target,
         return 0;
     }
 
-    /*
-     * EX is ticked before ID in this simulator.  When a producer completes EX
-     * in the same cycle that JEQ completes ID, the register file still contains
-     * the old value.  Forwarding this completed EX result fixes cases like:
-     *   MOVI R2 7
-     *   JEQ  R1 R2 2
-     * where JEQ previously saw R2 as 0.
-     */
-    if (ex_dest == reg_index &&
-        engine->ex_stage.completed &&
-        engine->ex_stage.reg.opcode != OPCODE_MOVR)
+    if (mem_dest == reg_index && stage_can_forward(&engine->mem_stage))
     {
-        return engine->ex_stage.reg.aluResult;
-    }
-
-    if (wb_dest == reg_index)
-    {
-        if (engine->wb_stage.reg.opcode == OPCODE_MOVR)
+        if (engine->mem_stage.reg.opcode == OPCODE_MOVR)
         {
-            return engine->wb_stage.reg.memoryData;
+            printf("  [FWD] R%d from MEM load value %d\n", reg_index, engine->mem_stage.reg.memoryData);
+            return engine->mem_stage.reg.memoryData;
         }
-        return engine->wb_stage.reg.aluResult;
-    }
 
-    if (mem_dest == reg_index && engine->mem_stage.reg.opcode != OPCODE_MOVR)
-    {
+        printf("  [FWD] R%d from MEM ALU value %d\n", reg_index, engine->mem_stage.reg.aluResult);
         return engine->mem_stage.reg.aluResult;
     }
 
+    if (ex_dest == reg_index && stage_can_forward(&engine->ex_stage) && engine->ex_stage.reg.opcode != OPCODE_MOVR)
+    {
+        printf("  [FWD] R%d from EX ALU value %d\n", reg_index, engine->ex_stage.reg.aluResult);
+        return engine->ex_stage.reg.aluResult;
+    }
+
+    if (wb_dest == reg_index && stage_can_forward(&engine->wb_stage))
+    {
+        if (engine->wb_stage.reg.opcode == OPCODE_MOVR)
+        {
+            printf("  [FWD] R%d from WB load value %d\n", reg_index, engine->wb_stage.reg.memoryData);
+            return engine->wb_stage.reg.memoryData;
+        }
+
+        printf("  [FWD] R%d from WB ALU value %d\n", reg_index, engine->wb_stage.reg.aluResult);
+        return engine->wb_stage.reg.aluResult;
+    }
+
     return readRegister(target, reg_index);
+}
+
+static int instruction_source_count(const PipelineRegister *reg, int sources[2])
+{
+    int count = 0;
+
+    if (reg == NULL || !reg->valid)
+    {
+        return 0;
+    }
+
+    switch (reg->opcode)
+    {
+    case OPCODE_ADD:
+    case OPCODE_SUB:
+    case OPCODE_MUL:
+    case OPCODE_AND:
+        sources[count++] = reg->r2;
+        sources[count++] = reg->r3;
+        break;
+    case OPCODE_JEQ:
+        sources[count++] = reg->r1;
+        sources[count++] = reg->r2;
+        break;
+    case OPCODE_ORI:
+    case OPCODE_LSL:
+    case OPCODE_LSR:
+    case OPCODE_MOVR:
+        sources[count++] = reg->r2;
+        break;
+    case OPCODE_MOVM:
+        sources[count++] = reg->r1;
+        sources[count++] = reg->r2;
+        break;
+    default:
+        break;
+    }
+
+    return count;
+}
+
+static bool source_waits_for_stage(const PipelineRegister *consumer,
+                                   const StageSlot *producer,
+                                   int source,
+                                   const char *producer_stage)
+{
+    int dest = destination_register(&producer->reg);
+
+    (void)consumer;
+
+    if (source == 0 || slot_is_empty(producer) || dest != source)
+    {
+        return false;
+    }
+
+    if (producer->reg.opcode == OPCODE_MOVR && strcmp(producer_stage, "EX") == 0)
+    {
+        printf("  [STALL] load-use hazard on R%d waiting for MOVR to reach MEM\n", source);
+        return true;
+    }
+
+    if (!stage_can_forward(producer))
+    {
+        printf("  [STALL] RAW hazard on R%d waiting for %s producer\n", source, producer_stage);
+        return true;
+    }
+
+    return false;
+}
+
+static bool id_has_data_hazard(const PipelineEngine *engine)
+{
+    int sources[2] = {0, 0};
+    int count = 0;
+
+    if (slot_is_empty(&engine->id_stage) || !engine->id_stage.completed)
+    {
+        return false;
+    }
+
+    count = instruction_source_count(&engine->id_stage.reg, sources);
+    for (int index = 0; index < count; ++index)
+    {
+        if (source_waits_for_stage(&engine->id_stage.reg, &engine->ex_stage, sources[index], "EX") ||
+            source_waits_for_stage(&engine->id_stage.reg, &engine->mem_stage, sources[index], "MEM") ||
+            source_waits_for_stage(&engine->id_stage.reg, &engine->wb_stage, sources[index], "WB"))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static void latch_decode_operands(CPU *target, PipelineEngine *engine, PipelineRegister *reg)
@@ -410,7 +513,7 @@ static void commitRegisterWrite(CPU *target, int reg_index, int32_t value, const
     int32_t old_value = readRegister(target, reg_index);
 
     /*
-     * Person 2 owns the register file and R0 protection.  Person 6 prints the
+     * Person 2 owns the register file and R0 protection.  The pipeline engine prints the
      * integration-level commit message before calling the teammate API.
      */
     writeRegister(target, reg_index, value);
@@ -428,7 +531,7 @@ static void commitMemoryWrite(CPU *target, int address, int32_t value)
 
     /*
      * Memory bounds and segment ownership remain inside Person 2's writeMemory.
-     * This wrapper only adds the Person 6 old/new debug print.
+     * This wrapper only adds the pipeline old/new debug print.
      */
     writeMemory(target, address, value);
 
@@ -455,6 +558,7 @@ static void flushPipeline(PipelineEngine *engine)
 
     clear_slot(&engine->if_stage);
     clear_slot(&engine->id_stage);
+    engine->stall_id_this_cycle = false;
 }
 
 static bool validatePipeline(const PipelineEngine *engine, bool fetched_this_cycle, bool mem_active_at_cycle_start)
@@ -462,18 +566,12 @@ static bool validatePipeline(const PipelineEngine *engine, bool fetched_this_cyc
     bool valid = true;
 
     /*
-     * Validation is intentionally non-fatal.  It gives Person 6 debugging
-     * visibility without taking ownership of Person 5's full hazard engine.
+     * Validation is intentionally non-fatal.  It gives debugging visibility for
+     * timing mistakes without stopping the simulator.
      */
     if (fetched_this_cycle && mem_active_at_cycle_start)
     {
         printf("  [VALIDATE] IF/MEM conflict detected in cycle %d\n", engine->cycle);
-        valid = false;
-    }
-
-    if (fetched_this_cycle && (engine->cycle % 2) == 0)
-    {
-        printf("  [VALIDATE] fetch happened outside the every-2-cycles cadence\n");
         valid = false;
     }
 
@@ -670,14 +768,18 @@ static void tick_slot(CPU *target, PipelineEngine *engine, StageSlot *slot, Stag
     }
 }
 
+static void tick_active_stages(CPU *target, PipelineEngine *engine)
+{
+    tick_slot(target, engine, &engine->wb_stage, STAGE_WB);
+    tick_slot(target, engine, &engine->mem_stage, STAGE_MEM);
+    tick_slot(target, engine, &engine->ex_stage, STAGE_EX);
+    tick_slot(target, engine, &engine->id_stage, STAGE_ID);
+    tick_slot(target, engine, &engine->if_stage, STAGE_IF);
+}
+
 static bool can_fetch_this_cycle(const CPU *target, const PipelineEngine *engine)
 {
     if (target->PC >= (uint32_t)target->instructionCount)
-    {
-        return false;
-    }
-
-    if ((engine->cycle % 2) == 0)
     {
         return false;
     }
@@ -723,8 +825,23 @@ static void fetch_into_if(CPU *target, PipelineEngine *engine)
            target->PC);
 }
 
-static void transfer_completed_stages(PipelineEngine *engine)
+static void transfer_completed_stages(CPU *target, PipelineEngine *engine)
 {
+    bool wb_will_vacate = slot_is_empty(&engine->wb_stage) || engine->wb_stage.completed;
+    bool mem_will_vacate = slot_is_empty(&engine->mem_stage) ||
+                           (engine->mem_stage.completed && wb_will_vacate);
+    bool ex_will_vacate = slot_is_empty(&engine->ex_stage) ||
+                          (engine->ex_stage.completed && mem_will_vacate);
+    bool id_will_move = !slot_is_empty(&engine->id_stage) &&
+                        engine->id_stage.completed &&
+                        !engine->stall_id_this_cycle &&
+                        ex_will_vacate;
+
+    if (id_will_move)
+    {
+        latch_decode_operands(target, engine, &engine->id_stage.reg);
+    }
+
     if (!slot_is_empty(&engine->wb_stage) && engine->wb_stage.completed)
     {
         clear_slot(&engine->wb_stage);
@@ -750,6 +867,12 @@ static void transfer_completed_stages(PipelineEngine *engine)
         engine->id_stage.completed &&
         slot_is_empty(&engine->ex_stage))
     {
+        if (engine->stall_id_this_cycle)
+        {
+            printf("  [STALL] ID holds instruction; IF is synchronized behind ID\n");
+            return;
+        }
+
         set_slot(&engine->ex_stage, engine->id_stage.reg, EX_CYCLES);
         clear_slot(&engine->id_stage);
     }
@@ -787,8 +910,8 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
 
     memset(&engine, 0, sizeof(engine));
 
-    printf("\nStarting Person 6 integrated pipeline simulation\n");
-    printf("Timing: IF=1, ID=2, EX=2, MEM=1, WB=1; fetch on odd cycles; IF/MEM conflict blocks fetch.\n");
+    printf("\nStarting pipeline simulation\n");
+    printf("Timing: IF=1, ID=2, EX=2, MEM=1, WB=1; IF/MEM conflict blocks fetch; RAW hazards use forwarding or stalls.\n");
 
     while (pipeline_has_work(target, &engine) && engine.cycle < max_cycles)
     {
@@ -796,6 +919,7 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
         bool mem_active_at_cycle_start = false;
 
         engine.cycle += 1;
+        engine.stall_id_this_cycle = false;
         mem_active_at_cycle_start = !slot_is_empty(&engine.mem_stage);
         print_cycle_header(&engine, target);
 
@@ -807,11 +931,7 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
         else
         {
             printf("  [IF] no fetch this cycle");
-            if ((engine.cycle % 2) == 0)
-            {
-                printf(" (fetch cadence)");
-            }
-            else if (!slot_is_empty(&engine.mem_stage))
+            if (!slot_is_empty(&engine.mem_stage))
             {
                 printf(" (IF/MEM conflict)");
             }
@@ -826,13 +946,10 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
             printf("\n");
         }
 
-        tick_slot(target, &engine, &engine.wb_stage, STAGE_WB);
-        tick_slot(target, &engine, &engine.mem_stage, STAGE_MEM);
-        tick_slot(target, &engine, &engine.ex_stage, STAGE_EX);
-        tick_slot(target, &engine, &engine.id_stage, STAGE_ID);
-        tick_slot(target, &engine, &engine.if_stage, STAGE_IF);
+        tick_active_stages(target, &engine);
+        engine.stall_id_this_cycle = id_has_data_hazard(&engine);
 
-        transfer_completed_stages(&engine);
+        transfer_completed_stages(target, &engine);
         validatePipeline(&engine, fetched_this_cycle, mem_active_at_cycle_start);
     }
 
