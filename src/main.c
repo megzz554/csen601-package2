@@ -123,7 +123,7 @@ int main(int argc, char **argv)
     memory_dump_instructions(16);
 
     pipeline_sim_run(&cpu, (PipelineSimOptions){
-                               .dump_nonzero_memory_only = true,
+                               .dump_nonzero_memory_only = false,
                                .max_cycles = 300,
                            });
     return 0;

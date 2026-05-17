@@ -575,6 +575,12 @@ static bool validatePipeline(const PipelineEngine *engine, bool fetched_this_cyc
         valid = false;
     }
 
+    if (fetched_this_cycle && (engine->cycle % 2) == 0)
+    {
+        printf("  [VALIDATE] fetch happened outside the every-2-cycles cadence\n");
+        valid = false;
+    }
+
     if (!slot_is_empty(&engine->id_stage) && engine->id_stage.cycles_left > ID_CYCLES)
     {
         printf("  [VALIDATE] ID cycle counter is invalid\n");
@@ -784,6 +790,11 @@ static bool can_fetch_this_cycle(const CPU *target, const PipelineEngine *engine
         return false;
     }
 
+    if ((engine->cycle % 2) == 0)
+    {
+        return false;
+    }
+
     if (!slot_is_empty(&engine->if_stage))
     {
         return false;
@@ -931,7 +942,11 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
         else
         {
             printf("  [IF] no fetch this cycle");
-            if (!slot_is_empty(&engine.mem_stage))
+            if ((engine.cycle % 2) == 0)
+            {
+                printf(" (fetch cadence)");
+            }
+            else if (!slot_is_empty(&engine.mem_stage))
             {
                 printf(" (IF/MEM conflict)");
             }
@@ -959,8 +974,16 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
     }
 
     printf("\nPipeline simulation finished after %d cycles.\n", engine.cycle);
-    (void)options.dump_nonzero_memory_only;
-    pipeline_dump_final_state(target);
+    if (options.dump_nonzero_memory_only)
+    {
+        pipeline_dump_final_state(target);
+    }
+    else
+    {
+        printf("\n================ Final State ================\n");
+        dumpRegisters(target);
+        dumpMemory(target);
+    }
 }
 
 void pipeline_dump_final_state(CPU *target)

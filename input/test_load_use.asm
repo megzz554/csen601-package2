@@ -1,0 +1,7 @@
+# MOVR followed immediately by a dependent instruction.
+MOVI R1 1024
+MOVI R2 9
+MOVM R2 R1 0
+MOVR R3 R1 0
+ADD R4 R3 R2
+SUB R5 R4 R3
