@@ -102,7 +102,7 @@ alu_operation_t opcode_alu_operation(opcode_t opcode)
     case OPCODE_AND:
         return ALU_OP_AND;
     case OPCODE_ORI:
-        return ALU_OP_OR;
+        return ALU_OP_XOR;
     case OPCODE_LSL:
         return ALU_OP_SHIFT_LEFT;
     case OPCODE_LSR:
