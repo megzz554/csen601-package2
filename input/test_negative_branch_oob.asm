@@ -1,0 +1,2 @@
+JEQ R0 R0 -2
+MOVI R1 99

@@ -18,7 +18,7 @@ typedef enum
     ALU_OP_SUB,
     ALU_OP_MUL,
     ALU_OP_AND,
-    ALU_OP_OR,
+    ALU_OP_XOR,
     ALU_OP_SHIFT_LEFT,
     ALU_OP_SHIFT_RIGHT,
     ALU_OP_PASS_B

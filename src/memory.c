@@ -30,7 +30,6 @@ void memory_store_instruction(uint32_t address, instruction_t instruction)
     }
 
     cpu.memory[address] = (int32_t)instruction;
-    printf("STORE: memory[%u] = 0x%08X\n", address, instruction);
 }
 
 instruction_t memory_fetch_instruction(uint32_t address)

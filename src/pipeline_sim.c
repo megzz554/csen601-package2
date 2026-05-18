@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 #include "memory.h"
 #include "opcodes.h"
@@ -39,6 +40,13 @@ typedef struct
     bool wait_for_taken_branch_mem;
 } PipelineEngine;
 
+typedef struct
+{
+    bool stalled;
+    int producer_reg;
+    const char *reason;
+} HazardDecision;
+
 static const char *opcode_name(int opcode)
 {
     switch (opcode)
@@ -56,7 +64,7 @@ static const char *opcode_name(int opcode)
     case OPCODE_AND:
         return "AND";
     case OPCODE_ORI:
-        return "ORI";
+        return "XORI";
     case OPCODE_JMP:
         return "JMP";
     case OPCODE_LSL:
@@ -229,6 +237,34 @@ static int destination_register(const PipelineRegister *reg)
     return instruction_writes_register(reg) ? reg->r1 : -1;
 }
 
+static bool instruction_reads_register(const PipelineRegister *reg, int reg_index)
+{
+    if (reg == NULL || !reg->valid || reg_index == 0)
+    {
+        return false;
+    }
+
+    switch (reg->opcode)
+    {
+    case OPCODE_ADD:
+    case OPCODE_SUB:
+    case OPCODE_MUL:
+    case OPCODE_AND:
+        return reg->r2 == reg_index || reg->r3 == reg_index;
+    case OPCODE_JEQ:
+        return reg->r1 == reg_index || reg->r2 == reg_index;
+    case OPCODE_ORI:
+    case OPCODE_LSL:
+    case OPCODE_LSR:
+    case OPCODE_MOVR:
+        return reg->r2 == reg_index;
+    case OPCODE_MOVM:
+        return reg->r1 == reg_index || reg->r2 == reg_index;
+    default:
+        return false;
+    }
+}
+
 /*
  * Lightweight forwarding for integration testing.
  * Person 5 owns complete hazard handling, but this prevents the Person 6 test
@@ -272,8 +308,12 @@ static int32_t read_operand_with_forwarding(CPU *target,
         return engine->wb_stage.reg.aluResult;
     }
 
-    if (mem_dest == reg_index && engine->mem_stage.reg.opcode != OPCODE_MOVR)
+    if (mem_dest == reg_index)
     {
+        if (engine->mem_stage.reg.opcode == OPCODE_MOVR)
+        {
+            return engine->mem_stage.reg.memoryData;
+        }
         return engine->mem_stage.reg.aluResult;
     }
 
@@ -385,6 +425,51 @@ static void printPipelineState(const PipelineEngine *engine)
     printf("\n");
 }
 
+static void printStageTraceLine(const char *stage_name, const StageSlot *slot)
+{
+    if (slot_is_empty(slot))
+    {
+        printf("  %s detail: EMPTY\n", stage_name);
+        return;
+    }
+
+    printf("  %s detail: ", stage_name);
+    if ((strcmp(stage_name, "IF") == 0) ||
+        (strcmp(stage_name, "ID") == 0 && !slot->completed))
+    {
+        printf("pending decode pc=%u raw=0x%08X\n",
+               slot->reg.pc,
+               slot->reg.rawInstruction);
+    }
+    else
+    {
+        print_instruction_detail(&slot->reg);
+    }
+
+    printf("    cycles_left=%d completed=%s\n",
+           slot->cycles_left,
+           slot->completed ? "yes" : "no");
+    printf("    inputs: pc=%u op1=%d op2=%d imm=%d shamt=%d addr=%d\n",
+           slot->reg.pc,
+           slot->reg.operand1,
+           slot->reg.operand2,
+           slot->reg.immediate,
+           slot->reg.shamt,
+           slot->reg.address);
+    printf("    outputs: alu=%d memData=%d\n",
+           slot->reg.aluResult,
+           slot->reg.memoryData);
+}
+
+static void printDetailedPipelineState(const PipelineEngine *engine)
+{
+    printStageTraceLine("IF", &engine->if_stage);
+    printStageTraceLine("ID", &engine->id_stage);
+    printStageTraceLine("EX", &engine->ex_stage);
+    printStageTraceLine("MEM", &engine->mem_stage);
+    printStageTraceLine("WB", &engine->wb_stage);
+}
+
 static void printRegisterUpdate(int reg_index, int32_t old_value, int32_t new_value, const char *stage)
 {
     printf("  R%d updated:\n", reg_index);
@@ -457,6 +542,42 @@ static void flushPipeline(PipelineEngine *engine)
     clear_slot(&engine->id_stage);
 }
 
+static HazardDecision evaluate_id_hazard(const PipelineEngine *engine)
+{
+    HazardDecision decision;
+    PipelineRegister consumer;
+    int producer_reg;
+
+    memset(&decision, 0, sizeof(decision));
+
+    if (slot_is_empty(&engine->id_stage) || engine->id_stage.completed)
+    {
+        return decision;
+    }
+
+    consumer = engine->id_stage.reg;
+    decode_raw_instruction(&consumer);
+
+    if (consumer.valid == 0)
+    {
+        return decision;
+    }
+
+    if (!slot_is_empty(&engine->ex_stage) && engine->ex_stage.reg.opcode == OPCODE_MOVR)
+    {
+        producer_reg = destination_register(&engine->ex_stage.reg);
+        if (producer_reg > 0 && instruction_reads_register(&consumer, producer_reg))
+        {
+            decision.stalled = true;
+            decision.producer_reg = producer_reg;
+            decision.reason = "waiting for MOVR load result from EX";
+            return decision;
+        }
+    }
+
+    return decision;
+}
+
 static bool validatePipeline(const PipelineEngine *engine, bool fetched_this_cycle, bool mem_active_at_cycle_start)
 {
     bool valid = true;
@@ -498,17 +619,24 @@ static bool calculate_branch_target(CPU *target,
 {
     bool taken = false;
     uint32_t old_pc = target->PC;
+    int64_t signed_target = 0;
 
     if (reg->opcode == OPCODE_JEQ)
     {
         taken = reg->operand1 == reg->operand2;
-        *target_pc = reg->pc + 1u + (uint32_t)reg->immediate;
         printf("  [BRANCH] JEQ compares %d and %d -> %s\n",
                reg->operand1,
                reg->operand2,
                taken ? "TAKEN" : "NOT TAKEN");
         if (taken)
         {
+            signed_target = (int64_t)reg->pc + 1ll + (int64_t)reg->immediate;
+            if (signed_target < 0 || signed_target >= INSTRUCTION_MEMORY_SIZE)
+            {
+                printf("  [BRANCH] invalid JEQ target %lld ignored\n", signed_target);
+                return false;
+            }
+            *target_pc = (uint32_t)signed_target;
             printf("  [BRANCH] updating PC from %u to %u\n", old_pc, *target_pc);
         }
     }
@@ -516,6 +644,11 @@ static bool calculate_branch_target(CPU *target,
     {
         uint32_t upper_pc = reg->pc & 0xF0000000u;
         *target_pc = upper_pc | ((uint32_t)reg->address & ADDR_MASK);
+        if (*target_pc >= INSTRUCTION_MEMORY_SIZE)
+        {
+            printf("  [BRANCH] invalid JMP target %u ignored\n", *target_pc);
+            return false;
+        }
         taken = true;
         printf("  [BRANCH] JMP target=%u (upper PC bits preserved)\n", *target_pc);
         printf("  [BRANCH] updating PC from %u to %u\n", old_pc, *target_pc);
@@ -548,14 +681,30 @@ static void complete_ex_stage(CPU *target, PipelineEngine *engine, PipelineRegis
     case ALU_OP_AND:
         reg->aluResult = reg->operand1 & reg->operand2;
         break;
-    case ALU_OP_OR:
-        reg->aluResult = reg->operand1 | reg->immediate;
+    case ALU_OP_XOR:
+        reg->aluResult = reg->operand1 ^ reg->immediate;
         break;
     case ALU_OP_SHIFT_LEFT:
-        reg->aluResult = (int32_t)((uint32_t)reg->operand1 << reg->shamt);
+        if (reg->shamt < 0 || reg->shamt > 31)
+        {
+            printf("  [EX] invalid LSL shift amount %d; result forced to 0\n", reg->shamt);
+            reg->aluResult = 0;
+        }
+        else
+        {
+            reg->aluResult = (int32_t)((uint32_t)reg->operand1 << reg->shamt);
+        }
         break;
     case ALU_OP_SHIFT_RIGHT:
-        reg->aluResult = (int32_t)((uint32_t)reg->operand1 >> reg->shamt);
+        if (reg->shamt < 0 || reg->shamt > 31)
+        {
+            printf("  [EX] invalid LSR shift amount %d; result forced to 0\n", reg->shamt);
+            reg->aluResult = 0;
+        }
+        else
+        {
+            reg->aluResult = (int32_t)((uint32_t)reg->operand1 >> reg->shamt);
+        }
         break;
     case ALU_OP_PASS_B:
         reg->aluResult = reg->operand2;
@@ -628,9 +777,13 @@ static void complete_wb_stage(CPU *target, PipelineRegister *reg)
     }
 }
 
-static void tick_slot(CPU *target, PipelineEngine *engine, StageSlot *slot, StageKind kind)
+static void tick_slot(CPU *target,
+                      PipelineEngine *engine,
+                      StageSlot *slot,
+                      StageKind kind,
+                      bool allow_progress)
 {
-    if (slot_is_empty(slot) || slot->completed)
+    if (slot_is_empty(slot) || slot->completed || !allow_progress)
     {
         return;
     }
@@ -778,22 +931,24 @@ static void print_cycle_header(const PipelineEngine *engine, const CPU *target)
     printf("\n================ Cycle %d ================\n", engine->cycle);
     printf("  PC=%u instructionCount=%d\n", target->PC, target->instructionCount);
     printPipelineState(engine);
+    printDetailedPipelineState(engine);
 }
 
 void pipeline_sim_run(CPU *target, PipelineSimOptions options)
 {
     PipelineEngine engine;
-    int max_cycles = options.max_cycles > 0 ? options.max_cycles : 200;
+    int max_cycles = options.max_cycles > 0 ? options.max_cycles : INT_MAX;
 
     memset(&engine, 0, sizeof(engine));
 
-    printf("\nStarting Person 6 integrated pipeline simulation\n");
+    printf("\nStarting pipeline simulation\n");
     printf("Timing: IF=1, ID=2, EX=2, MEM=1, WB=1; fetch on odd cycles; IF/MEM conflict blocks fetch.\n");
 
     while (pipeline_has_work(target, &engine) && engine.cycle < max_cycles)
     {
         bool fetched_this_cycle = false;
         bool mem_active_at_cycle_start = false;
+        HazardDecision hazard;
 
         engine.cycle += 1;
         mem_active_at_cycle_start = !slot_is_empty(&engine.mem_stage);
@@ -826,11 +981,19 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
             printf("\n");
         }
 
-        tick_slot(target, &engine, &engine.wb_stage, STAGE_WB);
-        tick_slot(target, &engine, &engine.mem_stage, STAGE_MEM);
-        tick_slot(target, &engine, &engine.ex_stage, STAGE_EX);
-        tick_slot(target, &engine, &engine.id_stage, STAGE_ID);
-        tick_slot(target, &engine, &engine.if_stage, STAGE_IF);
+        hazard = evaluate_id_hazard(&engine);
+        if (hazard.stalled)
+        {
+            printf("  [STALL] ID stalled on R%d: %s\n",
+                   hazard.producer_reg,
+                   hazard.reason);
+        }
+
+        tick_slot(target, &engine, &engine.wb_stage, STAGE_WB, true);
+        tick_slot(target, &engine, &engine.mem_stage, STAGE_MEM, true);
+        tick_slot(target, &engine, &engine.ex_stage, STAGE_EX, true);
+        tick_slot(target, &engine, &engine.id_stage, STAGE_ID, !hazard.stalled);
+        tick_slot(target, &engine, &engine.if_stage, STAGE_IF, true);
 
         transfer_completed_stages(&engine);
         validatePipeline(&engine, fetched_this_cycle, mem_active_at_cycle_start);
@@ -848,26 +1011,7 @@ void pipeline_sim_run(CPU *target, PipelineSimOptions options)
 
 void pipeline_dump_final_state(CPU *target)
 {
-    bool printed_any_memory = false;
-
     printf("\n================ Final State ================\n");
     dumpRegisters(target);
-
-    printf("\nDUMP: non-zero memory locations only:\n");
-    for (int address = 0; address < MEMORY_SIZE; ++address)
-    {
-        if (target->memory[address] != 0)
-        {
-            printf("  [%04d] %11d (0x%08X)\n",
-                   address,
-                   target->memory[address],
-                   (uint32_t)target->memory[address]);
-            printed_any_memory = true;
-        }
-    }
-
-    if (!printed_any_memory)
-    {
-        printf("  all memory locations are zero\n");
-    }
+    dumpMemory(target);
 }

@@ -9,49 +9,118 @@
 #include "parser.h"
 
 #define LINE_BUFFER_SIZE 128
+#define I_TYPE_IMMEDIATE_MIN (-131072)
+#define I_TYPE_IMMEDIATE_MAX 131071
+#define SHIFT_AMOUNT_MIN 0
+#define SHIFT_AMOUNT_MAX 31
 
 // Parse register tokens such as R0, R1, ... R31.
 // The parser only translates text into numbers to build the raw instruction.
-static uint32_t parse_register(const char *token)
+static bool parse_register(const char *token, uint32_t *value)
 {
     if (token == NULL || token[0] != 'R')
     {
         printf("PARSER ERROR: expected register token like R0 but got '%s'\n", token ? token : "(null)");
-        return 0u;
+        return false;
     }
 
     char *endptr = NULL;
     long reg = strtol(token + 1, &endptr, 10);
 
-    if (endptr == token + 1 || reg < 0 || reg > 31)
+    if (endptr == token + 1 || *endptr != '\0' || reg < 0 || reg > 31)
     {
         printf("PARSER ERROR: invalid register '%s', use R0..R31\n", token);
-        return 0u;
+        return false;
     }
 
-    return (uint32_t)reg;
+    *value = (uint32_t)reg;
+    return true;
 }
 
 // Parse an immediate value from the instruction text.
 // Supports decimal and 0x-prefixed hexadecimal values.
-static int32_t parse_immediate(const char *token)
+static bool parse_immediate(const char *token, int32_t *value)
 {
     if (token == NULL)
     {
         printf("PARSER ERROR: expected immediate token but got null\n");
-        return 0;
+        return false;
     }
 
     char *endptr = NULL;
-    long value = strtol(token, &endptr, 0);
+    long parsed_value = strtol(token, &endptr, 0);
 
-    if (endptr == token)
+    if (endptr == token || *endptr != '\0')
     {
         printf("PARSER ERROR: invalid immediate '%s'\n", token);
-        return 0;
+        return false;
     }
 
-    return (int32_t)value;
+    *value = (int32_t)parsed_value;
+    return true;
+}
+
+static bool validate_i_type_immediate(int32_t value, const char *opcode_name)
+{
+    if (value < I_TYPE_IMMEDIATE_MIN || value > I_TYPE_IMMEDIATE_MAX)
+    {
+        printf("PARSER ERROR: %s immediate %d is outside 18-bit signed range [%d..%d]\n",
+               opcode_name,
+               value,
+               I_TYPE_IMMEDIATE_MIN,
+               I_TYPE_IMMEDIATE_MAX);
+        return false;
+    }
+
+    return true;
+}
+
+static bool validate_shift_amount(int32_t amount, const char *opcode_name)
+{
+    if (amount < SHIFT_AMOUNT_MIN || amount > SHIFT_AMOUNT_MAX)
+    {
+        printf("PARSER ERROR: %s shift amount %d is outside allowed range [%d..%d]\n",
+               opcode_name,
+               amount,
+               SHIFT_AMOUNT_MIN,
+               SHIFT_AMOUNT_MAX);
+        return false;
+    }
+
+    return true;
+}
+
+static bool ensure_exact_arg_count(const char *opcode_token, char *arg1, char *arg2, char *arg3, char *arg4)
+{
+    if (arg1 == NULL || arg2 == NULL || arg3 == NULL || arg4 != NULL)
+    {
+        printf("PARSER ERROR: malformed %s instruction, expected exactly 3 operands\n", opcode_token);
+        return false;
+    }
+
+    return true;
+}
+
+static bool ensure_two_operand_form(const char *opcode_token, char *arg1, char *arg2, char *arg3)
+{
+    if (arg1 == NULL || arg2 == NULL || arg3 != NULL)
+    {
+        printf("PARSER ERROR: malformed %s instruction, expected exactly 2 operands\n", opcode_token);
+        return false;
+    }
+
+    return true;
+}
+
+static bool ensure_one_operand_form(const char *opcode_token, char *arg1, char *arg2)
+{
+    if (arg1 == NULL || arg2 != NULL)
+    {
+        printf("PARSER ERROR: malformed %s instruction, expected exactly 1 operand\n", opcode_token);
+        return false;
+    }
+
+    return true;
 }
 
 void parse_assembly_file(const char *filepath)
@@ -90,6 +159,7 @@ void parse_assembly_file(const char *filepath)
         char *arg1 = strtok(NULL, " \t,\n");
         char *arg2 = strtok(NULL, " \t,\n");
         char *arg3 = strtok(NULL, " \t,\n");
+        char *arg4 = strtok(NULL, " \t,\n");
 
         int opcode = opcode_from_string(opcode_token);
         if (opcode < 0)
@@ -110,73 +180,153 @@ void parse_assembly_file(const char *filepath)
         case OPCODE_MUL:
         case OPCODE_AND:
         {
-            uint32_t r1 = parse_register(arg1);
-            uint32_t r2 = parse_register(arg2);
-            uint32_t r3 = parse_register(arg3);
+            uint32_t r1 = 0;
+            uint32_t r2 = 0;
+            uint32_t r3 = 0;
+            if (!ensure_exact_arg_count(opcode_token, arg1, arg2, arg3, arg4))
+            {
+                continue;
+            }
+            if (!parse_register(arg1, &r1) ||
+                !parse_register(arg2, &r2) ||
+                !parse_register(arg3, &r3))
+            {
+                continue;
+            }
             encoded = encode_r_type((opcode_t)opcode, r1, r2, r3, 0u);
             break;
         }
         case OPCODE_MOVR:
         {
-            if (arg3 != NULL && arg3[0] == 'R')
+            int32_t immediate = 0;
+            uint32_t r1 = 0;
+            uint32_t r2 = 0;
+            if (!ensure_exact_arg_count(opcode_token, arg1, arg2, arg3, arg4))
             {
-                uint32_t r1 = parse_register(arg1);
-                uint32_t r2 = parse_register(arg2);
-                uint32_t r3 = parse_register(arg3);
-                encoded = encode_r_type((opcode_t)opcode, r1, r2, r3, 0u);
+                continue;
             }
-            else
+            if (!parse_register(arg1, &r1) ||
+                !parse_register(arg2, &r2) ||
+                !parse_immediate(arg3, &immediate) ||
+                !validate_i_type_immediate(immediate, opcode_token))
             {
-                uint32_t r1 = parse_register(arg1);
-                uint32_t r2 = parse_register(arg2);
-                int32_t immediate = parse_immediate(arg3);
-                encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
+                continue;
             }
+            encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
             break;
         }
         case OPCODE_MOVI:
         {
-            uint32_t r1 = parse_register(arg1);
-            int32_t immediate = parse_immediate(arg2);
+            int32_t immediate = 0;
+            uint32_t r1 = 0;
+            if (!ensure_two_operand_form(opcode_token, arg1, arg2, arg3))
+            {
+                continue;
+            }
+            if (!parse_register(arg1, &r1) ||
+                !parse_immediate(arg2, &immediate) ||
+                !validate_i_type_immediate(immediate, opcode_token))
+            {
+                continue;
+            }
             encoded = encode_i_type((opcode_t)opcode, r1, 0u, immediate);
             break;
         }
         case OPCODE_ORI:
         {
-            uint32_t r1 = parse_register(arg1);
-            uint32_t r2 = parse_register(arg2);
-            int32_t immediate = parse_immediate(arg3);
+            int32_t immediate = 0;
+            uint32_t r1 = 0;
+            uint32_t r2 = 0;
+            if (!ensure_exact_arg_count(opcode_token, arg1, arg2, arg3, arg4))
+            {
+                continue;
+            }
+            if (!parse_register(arg1, &r1) ||
+                !parse_register(arg2, &r2) ||
+                !parse_immediate(arg3, &immediate) ||
+                !validate_i_type_immediate(immediate, opcode_token))
+            {
+                continue;
+            }
             encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
             break;
         }
         case OPCODE_JEQ:
         {
-            uint32_t r1 = parse_register(arg1);
-            uint32_t r2 = parse_register(arg2);
-            int32_t offset = parse_immediate(arg3);
+            int32_t offset = 0;
+            uint32_t r1 = 0;
+            uint32_t r2 = 0;
+            if (!ensure_exact_arg_count(opcode_token, arg1, arg2, arg3, arg4))
+            {
+                continue;
+            }
+            if (!parse_register(arg1, &r1) ||
+                !parse_register(arg2, &r2) ||
+                !parse_immediate(arg3, &offset) ||
+                !validate_i_type_immediate(offset, opcode_token))
+            {
+                continue;
+            }
             encoded = encode_i_type((opcode_t)opcode, r1, r2, offset);
             break;
         }
         case OPCODE_LSL:
         case OPCODE_LSR:
         {
-            uint32_t r1 = parse_register(arg1);
-            uint32_t r2 = parse_register(arg2);
-            int32_t amount = parse_immediate(arg3);
+            int32_t amount = 0;
+            uint32_t r1 = 0;
+            uint32_t r2 = 0;
+            if (!ensure_exact_arg_count(opcode_token, arg1, arg2, arg3, arg4))
+            {
+                continue;
+            }
+            if (!parse_register(arg1, &r1) ||
+                !parse_register(arg2, &r2) ||
+                !parse_immediate(arg3, &amount) ||
+                !validate_shift_amount(amount, opcode_token))
+            {
+                continue;
+            }
             encoded = encode_r_type((opcode_t)opcode, r1, r2, 0u, (uint32_t)amount);
             break;
         }
         case OPCODE_JMP:
         {
-            uint32_t address = (uint32_t)parse_immediate(arg1);
+            int32_t immediate = 0;
+            uint32_t address = 0u;
+            if (!ensure_one_operand_form(opcode_token, arg1, arg2))
+            {
+                continue;
+            }
+            if (!parse_immediate(arg1, &immediate))
+            {
+                continue;
+            }
+            if (immediate < 0)
+            {
+                printf("PARSER ERROR: JMP address %d must be non-negative\n", immediate);
+                continue;
+            }
+            address = (uint32_t)immediate;
             encoded = encode_j_type((opcode_t)opcode, address);
             break;
         }
         case OPCODE_MOVM:
         {
-            uint32_t r1 = parse_register(arg1);
-            uint32_t r2 = arg3 == NULL ? 0u : parse_register(arg2);
-            int32_t immediate = parse_immediate(arg3 == NULL ? arg2 : arg3);
+            int32_t immediate = 0;
+            uint32_t r1 = 0;
+            uint32_t r2 = 0;
+            if (!ensure_exact_arg_count(opcode_token, arg1, arg2, arg3, arg4))
+            {
+                continue;
+            }
+            if (!parse_register(arg1, &r1) ||
+                !parse_register(arg2, &r2) ||
+                !parse_immediate(arg3, &immediate) ||
+                !validate_i_type_immediate(immediate, opcode_token))
+            {
+                continue;
+            }
             encoded = encode_i_type((opcode_t)opcode, r1, r2, immediate);
             break;
         }
@@ -185,7 +335,6 @@ void parse_assembly_file(const char *filepath)
             continue;
         }
 
-        printf("PARSE: '%s' -> 0x%08X\n", line, encoded);
         memory_store_instruction(instruction_address, encoded);
         instruction_address += 1u;
 

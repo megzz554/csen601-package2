@@ -1,0 +1,2 @@
+MOVI R1 5
+XORI R2 R1 3
